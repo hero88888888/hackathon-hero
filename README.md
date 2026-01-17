@@ -1,73 +1,36 @@
-# Welcome to your Lovable project
+# Hyperliquid Trade Ledger API
 
-## Project info
+A backend service for the **Hyperliquid Trade Ledger API Challenge** with RESTful API endpoints for trade history, PnL calculation, position tracking, and leaderboards.
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+## 🚀 Quick Start
 
-## How can I edit this code?
-
-There are several ways of editing your application.
-
-**Use Lovable**
-
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
-
-Changes made via Lovable will be committed automatically to this repo.
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
-
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
+**Test Wallets:**
+```
+0x0e09b56ef137f417e424f1265425e93bfff77e17
+0x186b7610ff3f2e3fd7985b95f525ee0e37a79a74
+0x6c8031a9eb4415284f3f89c0420f697c87168263
 ```
 
-**Edit a file directly in GitHub**
+## 📡 API Endpoints
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+| Endpoint | Description |
+|----------|-------------|
+| `GET /v1-trades?user=&coin=&fromMs=&toMs=&builderOnly=` | Normalized trade fills |
+| `GET /v1-positions-history?user=&coin=&fromMs=&toMs=&builderOnly=` | Time-ordered position states |
+| `GET /v1-pnl?user=&coin=&fromMs=&toMs=&builderOnly=&maxStartCapital=` | Realized PnL with returnPct |
+| `GET /v1-leaderboard?coin=&metric=&maxStartCapital=&builderOnly=` | Ranked users |
+| `GET /v1-deposits?user=&fromMs=&toMs=` | Deposit tracking (bonus) |
 
-**Use GitHub Codespaces**
+## 🔧 Builder-Only Mode
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+Set `TARGET_BUILDER_TAG` env var. Tainted positions (mixed builder/non-builder trades) are flagged and excluded from builder-only leaderboards.
 
-## What technologies are used for this project?
+## 📊 PnL Calculation
 
-This project is built with:
+Uses capped normalization: `returnPct = realizedPnl / min(max(startEquity, 100), maxStartCapital) * 100`
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+## 🛠️ Tech Stack
 
-## How can I deploy this project?
-
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
-
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+- **Frontend**: React, Vite, TypeScript, Tailwind CSS
+- **Backend**: Edge Functions (Deno), PostgreSQL
+- **Data Source**: Hyperliquid Public API
