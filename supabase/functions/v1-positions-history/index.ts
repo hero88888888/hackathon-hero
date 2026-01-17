@@ -1,123 +1,17 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+/**
+ * Position History Endpoint (GET /v1-positions-history)
+ * 
+ * Returns time-ordered position states with taint detection.
+ * Each state represents the position at a point in time.
+ */
+
+import { createDataSource } from "../_shared/datasource.ts";
+import { normalizeFills, buildPositionHistory, reconstructLifecycles } from "../_shared/ledger-engine.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
-
-const HL_API_URL = "https://api.hyperliquid.xyz/info";
-
-interface HyperliquidFill {
-  coin: string;
-  px: string;
-  sz: string;
-  side: string;
-  time: number;
-  startPosition: string;
-  dir: string;
-  closedPnl: string;
-  hash: string;
-  fee: string;
-  builder?: string;
-  builderFee?: string;
-}
-
-interface PositionState {
-  timeMs: number;
-  coin: string;
-  netSize: number;
-  avgEntryPx: number;
-  side: string;
-  tainted: boolean;
-  builderOnly: boolean;
-}
-
-async function fetchUserFills(user: string): Promise<HyperliquidFill[]> {
-  const response = await fetch(HL_API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "userFills", user }),
-  });
-  if (!response.ok) throw new Error(`Failed to fetch fills: ${response.status}`);
-  return response.json();
-}
-
-function buildPositionHistory(fills: HyperliquidFill[], targetBuilder: string, builderOnly: boolean): PositionState[] {
-  // Group by coin
-  const byCoin: Record<string, HyperliquidFill[]> = {};
-  for (const fill of fills) {
-    if (!byCoin[fill.coin]) byCoin[fill.coin] = [];
-    byCoin[fill.coin].push(fill);
-  }
-
-  const positionStates: PositionState[] = [];
-
-  for (const [coin, coinFills] of Object.entries(byCoin)) {
-    // Sort by time ascending
-    coinFills.sort((a, b) => a.time - b.time);
-
-    let netSize = 0;
-    let avgEntryPx = 0;
-    let totalCost = 0;
-    let hasBuilderTrades = false;
-    let hasNonBuilderTrades = false;
-
-    for (const fill of coinFills) {
-      const isBuilderTrade = targetBuilder ? 
-        (fill.builder === targetBuilder || (fill.builderFee && parseFloat(fill.builderFee) > 0)) : 
-        !!(fill.builder || (fill.builderFee && parseFloat(fill.builderFee) > 0));
-
-      if (isBuilderTrade) hasBuilderTrades = true;
-      else hasNonBuilderTrades = true;
-
-      const fillSize = parseFloat(fill.sz);
-      const fillPrice = parseFloat(fill.px);
-      const direction = fill.side === 'B' ? 1 : -1;
-      const signedSize = fillSize * direction;
-
-      // Update position using average cost method
-      if ((netSize >= 0 && direction > 0) || (netSize <= 0 && direction < 0)) {
-        // Adding to position
-        totalCost += fillPrice * fillSize;
-        netSize += signedSize;
-        avgEntryPx = Math.abs(netSize) > 0 ? totalCost / Math.abs(netSize) : 0;
-      } else {
-        // Reducing position
-        const reduceSize = Math.min(Math.abs(netSize), fillSize);
-        totalCost -= avgEntryPx * reduceSize;
-        netSize += signedSize;
-        
-        if (Math.abs(netSize) < 0.0001) {
-          netSize = 0;
-          avgEntryPx = 0;
-          totalCost = 0;
-          hasBuilderTrades = false;
-          hasNonBuilderTrades = false;
-        }
-      }
-
-      const tainted = hasBuilderTrades && hasNonBuilderTrades;
-      const isBuilderOnlyPosition = hasBuilderTrades && !hasNonBuilderTrades;
-
-      // Skip if builderOnly filter and position is tainted or not builder-only
-      if (builderOnly && (tainted || !isBuilderOnlyPosition)) continue;
-
-      positionStates.push({
-        timeMs: fill.time,
-        coin,
-        netSize,
-        avgEntryPx,
-        side: netSize > 0 ? 'long' : netSize < 0 ? 'short' : 'flat',
-        tainted,
-        builderOnly: isBuilderOnlyPosition,
-      });
-    }
-  }
-
-  // Sort by time descending
-  positionStates.sort((a, b) => b.timeMs - a.timeMs);
-  return positionStates;
-}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -131,6 +25,7 @@ Deno.serve(async (req) => {
     const fromMs = url.searchParams.get('fromMs');
     const toMs = url.searchParams.get('toMs');
     const builderOnly = url.searchParams.get('builderOnly') === 'true';
+    const includeLifecycles = url.searchParams.get('includeLifecycles') === 'true';
     const targetBuilder = Deno.env.get('TARGET_BUILDER_TAG') || '';
 
     if (!user) {
@@ -140,8 +35,15 @@ Deno.serve(async (req) => {
       );
     }
 
-    const fills = await fetchUserFills(user);
-    let positions = buildPositionHistory(fills, targetBuilder, builderOnly);
+    // Use datasource abstraction
+    const dataSource = createDataSource();
+    const fills = await dataSource.fetchUserFills(user);
+
+    // Normalize fills with builder attribution
+    const trades = normalizeFills(fills, targetBuilder);
+
+    // Build position history (time-ordered states)
+    let positions = buildPositionHistory(trades, targetBuilder, builderOnly);
 
     // Apply filters
     if (coin) {
@@ -154,6 +56,28 @@ Deno.serve(async (req) => {
       positions = positions.filter(p => p.timeMs <= parseInt(toMs));
     }
 
+    // Optionally include full lifecycle data
+    let lifecycles = null;
+    if (includeLifecycles) {
+      lifecycles = reconstructLifecycles(trades, targetBuilder);
+      
+      // Filter lifecycles if builderOnly
+      if (builderOnly) {
+        lifecycles = lifecycles.filter(l => l.isBuilderOnly && !l.isTainted);
+      }
+      
+      // Apply coin/time filters to lifecycles
+      if (coin) {
+        lifecycles = lifecycles.filter(l => l.coin === coin);
+      }
+      if (fromMs) {
+        lifecycles = lifecycles.filter(l => l.startTime >= parseInt(fromMs));
+      }
+      if (toMs) {
+        lifecycles = lifecycles.filter(l => !l.endTime || l.endTime <= parseInt(toMs));
+      }
+    }
+
     return new Response(
       JSON.stringify({
         user,
@@ -162,7 +86,34 @@ Deno.serve(async (req) => {
         toMs: toMs ? parseInt(toMs) : null,
         builderOnly,
         count: positions.length,
-        positions,
+        positions: positions.map(p => ({
+          timeMs: p.timeMs,
+          coin: p.coin,
+          netSize: p.netSize,
+          avgEntryPx: p.avgEntryPx,
+          side: p.side,
+          tainted: p.tainted,
+          builderOnly: p.builderOnly,
+        })),
+        ...(lifecycles && {
+          lifecycleCount: lifecycles.length,
+          lifecycles: lifecycles.map(l => ({
+            id: l.id,
+            coin: l.coin,
+            side: l.side,
+            startTime: l.startTime,
+            endTime: l.endTime,
+            avgEntryPx: l.avgEntryPx,
+            avgExitPx: l.avgExitPx,
+            maxSize: l.maxSize,
+            realizedPnl: l.realizedPnl,
+            feesPaid: l.feesPaid,
+            tradeCount: l.tradeCount,
+            isTainted: l.isTainted,
+            isBuilderOnly: l.isBuilderOnly,
+            status: l.status,
+          })),
+        }),
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );

@@ -1,56 +1,25 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+/**
+ * Leaderboard Endpoint (GET /v1-leaderboard)
+ * 
+ * Ranks users by a selected metric (pnl, returnPct, volume).
+ * Supports builder-only mode which excludes tainted users.
+ */
+
+import { createDataSource } from "../_shared/datasource.ts";
+import { normalizeFills, reconstructLifecycles, calculatePnL } from "../_shared/ledger-engine.ts";
+import type { LeaderboardEntry } from "../_shared/types.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const HL_API_URL = "https://api.hyperliquid.xyz/info";
-
-// Test wallet addresses for the hackathon
-const TEST_WALLETS = [
+// Default test wallets for the hackathon
+const DEFAULT_TEST_WALLETS = [
   "0x0e09b56ef137f417e424f1265425e93bfff77e17",
   "0x186b7610ff3f2e3fd7985b95f525ee0e37a79a74",
   "0x6c8031a9eb4415284f3f89c0420f697c87168263",
 ];
-
-interface HyperliquidFill {
-  coin: string;
-  px: string;
-  sz: string;
-  side: string;
-  time: number;
-  closedPnl: string;
-  fee: string;
-  builder?: string;
-  builderFee?: string;
-}
-
-interface ClearinghouseState {
-  marginSummary: {
-    accountValue: string;
-  };
-}
-
-async function fetchUserFills(user: string): Promise<HyperliquidFill[]> {
-  const response = await fetch(HL_API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "userFills", user }),
-  });
-  if (!response.ok) throw new Error(`Failed to fetch fills for ${user}`);
-  return response.json();
-}
-
-async function fetchClearinghouseState(user: string): Promise<ClearinghouseState> {
-  const response = await fetch(HL_API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "clearinghouseState", user }),
-  });
-  if (!response.ok) throw new Error(`Failed to fetch state for ${user}`);
-  return response.json();
-}
 
 interface UserMetrics {
   user: string;
@@ -58,7 +27,14 @@ interface UserMetrics {
   pnl: number;
   returnPct: number;
   tradeCount: number;
+  builderTradeCount: number;
   tainted: boolean;
+  lifecycleStats: {
+    open: number;
+    closed: number;
+    tainted: number;
+    total: number;
+  };
 }
 
 async function calculateUserMetrics(
@@ -71,59 +47,57 @@ async function calculateUserMetrics(
   targetBuilder: string
 ): Promise<UserMetrics | null> {
   try {
+    const dataSource = createDataSource();
+    
     const [fills, state] = await Promise.all([
-      fetchUserFills(user),
-      fetchClearinghouseState(user),
+      dataSource.fetchUserFills(user),
+      dataSource.fetchClearinghouseState(user),
     ]);
 
-    let filteredFills = [...fills];
-    if (coin) filteredFills = filteredFills.filter(f => f.coin === coin);
-    if (fromMs) filteredFills = filteredFills.filter(f => f.time >= fromMs);
-    if (toMs) filteredFills = filteredFills.filter(f => f.time <= toMs);
+    // Normalize and reconstruct
+    const trades = normalizeFills(fills, targetBuilder);
+    const lifecycles = reconstructLifecycles(trades, targetBuilder);
 
-    let hasBuilderTrades = false;
-    let hasNonBuilderTrades = false;
-    let volume = 0;
-    let pnl = 0;
-    let fees = 0;
-    let tradeCount = 0;
+    // Calculate PnL
+    const result = calculatePnL(
+      trades,
+      lifecycles,
+      state,
+      user,
+      coin,
+      fromMs,
+      toMs,
+      builderOnly,
+      maxStartCapital
+    );
 
-    for (const fill of filteredFills) {
-      const isBuilderTrade = targetBuilder
-        ? fill.builder === targetBuilder || (fill.builderFee && parseFloat(fill.builderFee) > 0)
-        : !!(fill.builder || (fill.builderFee && parseFloat(fill.builderFee) > 0));
-
-      if (isBuilderTrade) hasBuilderTrades = true;
-      else hasNonBuilderTrades = true;
-
-      if (builderOnly && !isBuilderTrade) continue;
-
-      volume += parseFloat(fill.px) * parseFloat(fill.sz);
-      pnl += parseFloat(fill.closedPnl);
-      fees += parseFloat(fill.fee);
-      tradeCount++;
+    // For builder-only leaderboard, exclude tainted users entirely
+    if (builderOnly && result.tainted) {
+      return null;
     }
 
-    const tainted = builderOnly && hasBuilderTrades && hasNonBuilderTrades;
-
-    // Exclude tainted users from builder-only leaderboard
-    if (builderOnly && tainted) return null;
-
-    const accountValue = parseFloat(state?.marginSummary?.accountValue || '0');
-    const estimatedStartEquity = accountValue - pnl + fees;
-    const effectiveCapital = Math.min(Math.max(estimatedStartEquity, 100), maxStartCapital);
-    const returnPct = effectiveCapital > 0 ? (pnl / effectiveCapital) * 100 : 0;
+    // Calculate lifecycle stats
+    const relevantLifecycles = builderOnly 
+      ? lifecycles.filter(l => l.isBuilderOnly && !l.isTainted)
+      : lifecycles;
 
     return {
       user,
-      volume,
-      pnl,
-      returnPct,
-      tradeCount,
-      tainted,
+      volume: result.volume,
+      pnl: result.realizedPnl,
+      returnPct: result.returnPct,
+      tradeCount: result.tradeCount,
+      builderTradeCount: result.builderTradeCount,
+      tainted: result.tainted,
+      lifecycleStats: {
+        open: relevantLifecycles.filter(l => l.status === 'open').length,
+        closed: relevantLifecycles.filter(l => l.status === 'closed').length,
+        tainted: lifecycles.filter(l => l.isTainted).length,
+        total: relevantLifecycles.length,
+      },
     };
   } catch (error) {
-    console.error(`Error fetching metrics for ${user}:`, error);
+    console.error(`Error calculating metrics for ${user}:`, error);
     return null;
   }
 }
@@ -139,18 +113,28 @@ Deno.serve(async (req) => {
     const fromMs = url.searchParams.get('fromMs');
     const toMs = url.searchParams.get('toMs');
     const metric = url.searchParams.get('metric') || 'pnl';
-    const maxStartCapital = parseFloat(url.searchParams.get('maxStartCapital') || '10000');
+    const maxStartCapitalParam = url.searchParams.get('maxStartCapital');
     const builderOnly = url.searchParams.get('builderOnly') === 'true';
+    const excludeTainted = url.searchParams.get('excludeTainted') === 'true';
     const targetBuilder = Deno.env.get('TARGET_BUILDER_TAG') || '';
+    const envMaxStartCapital = Deno.env.get('MAX_START_CAPITAL');
+    
+    const maxStartCapital = maxStartCapitalParam 
+      ? parseFloat(maxStartCapitalParam) 
+      : envMaxStartCapital 
+        ? parseFloat(envMaxStartCapital) 
+        : 10000;
 
-    // Get additional users from query param or use test wallets
+    // Get users list from query param or use defaults
     const usersParam = url.searchParams.get('users');
-    const users = usersParam ? usersParam.split(',') : TEST_WALLETS;
+    const users = usersParam 
+      ? usersParam.split(',').map(u => u.trim().toLowerCase())
+      : DEFAULT_TEST_WALLETS;
 
-    // Fetch metrics for all users in parallel
+    // Calculate metrics for all users in parallel
     const metricsPromises = users.map(user =>
       calculateUserMetrics(
-        user.toLowerCase(),
+        user,
         coin,
         fromMs ? parseInt(fromMs) : null,
         toMs ? parseInt(toMs) : null,
@@ -161,7 +145,12 @@ Deno.serve(async (req) => {
     );
 
     const allMetrics = await Promise.all(metricsPromises);
-    const validMetrics = allMetrics.filter((m): m is UserMetrics => m !== null);
+    let validMetrics = allMetrics.filter((m): m is UserMetrics => m !== null);
+
+    // Optionally exclude tainted users
+    if (excludeTainted) {
+      validMetrics = validMetrics.filter(m => !m.tainted);
+    }
 
     // Sort by selected metric
     validMetrics.sort((a, b) => {
@@ -170,17 +159,22 @@ Deno.serve(async (req) => {
           return b.volume - a.volume;
         case 'returnPct':
           return b.returnPct - a.returnPct;
+        case 'tradeCount':
+          return b.tradeCount - a.tradeCount;
         case 'pnl':
         default:
           return b.pnl - a.pnl;
       }
     });
 
-    // Add ranks
-    const rankedLeaderboard = validMetrics.map((m, index) => ({
+    // Build ranked leaderboard
+    const leaderboard: LeaderboardEntry[] = validMetrics.map((m, index) => ({
       rank: index + 1,
       user: m.user,
-      metricValue: metric === 'volume' ? m.volume : metric === 'returnPct' ? m.returnPct : m.pnl,
+      metricValue: metric === 'volume' ? m.volume 
+        : metric === 'returnPct' ? m.returnPct 
+        : metric === 'tradeCount' ? m.tradeCount 
+        : m.pnl,
       volume: m.volume,
       pnl: m.pnl,
       returnPct: m.returnPct,
@@ -196,8 +190,10 @@ Deno.serve(async (req) => {
         metric,
         maxStartCapital,
         builderOnly,
-        count: rankedLeaderboard.length,
-        leaderboard: rankedLeaderboard,
+        excludeTainted,
+        count: leaderboard.length,
+        totalUsersQueried: users.length,
+        leaderboard,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
