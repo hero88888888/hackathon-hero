@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { ArrowUpRight, ArrowDownRight } from "lucide-react";
+import { ArrowUpRight, ArrowDownRight, ExternalLink } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -8,23 +8,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
-interface Trade {
-  id: string;
-  timestamp: string;
-  coin: string;
-  side: "long" | "short";
-  size: number;
-  price: number;
-  pnl: number;
-  fee: number;
-}
+import type { ProcessedTrade } from "@/lib/hyperliquid";
 
 interface TradeHistoryProps {
-  trades: Trade[];
+  trades: ProcessedTrade[];
+  onTradeClick: (trade: ProcessedTrade) => void;
 }
 
-export const TradeHistory = ({ trades }: TradeHistoryProps) => {
+export const TradeHistory = ({ trades, onTradeClick }: TradeHistoryProps) => {
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
@@ -37,7 +28,7 @@ export const TradeHistory = ({ trades }: TradeHistoryProps) => {
           Trade History
         </h3>
         <span className="text-xs font-mono text-muted-foreground">
-          {trades.length} trades
+          {trades.length} trades • Click for details
         </span>
       </div>
 
@@ -54,6 +45,9 @@ export const TradeHistory = ({ trades }: TradeHistoryProps) => {
               <TableHead className="font-mono text-xs text-muted-foreground">
                 SIDE
               </TableHead>
+              <TableHead className="font-mono text-xs text-muted-foreground">
+                DIRECTION
+              </TableHead>
               <TableHead className="font-mono text-xs text-muted-foreground text-right">
                 SIZE
               </TableHead>
@@ -66,6 +60,9 @@ export const TradeHistory = ({ trades }: TradeHistoryProps) => {
               <TableHead className="font-mono text-xs text-muted-foreground text-right">
                 FEE
               </TableHead>
+              <TableHead className="font-mono text-xs text-muted-foreground text-center">
+                TX
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -74,8 +71,9 @@ export const TradeHistory = ({ trades }: TradeHistoryProps) => {
                 key={trade.id}
                 initial={{ opacity: 0, x: -20 }}
                 animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: index * 0.05 }}
-                className="border-border hover:bg-muted/50"
+                transition={{ delay: index * 0.02 }}
+                onClick={() => onTradeClick(trade)}
+                className="border-border hover:bg-muted/50 cursor-pointer"
               >
                 <TableCell className="font-mono text-xs text-muted-foreground">
                   {trade.timestamp}
@@ -99,27 +97,48 @@ export const TradeHistory = ({ trades }: TradeHistoryProps) => {
                     {trade.side.toUpperCase()}
                   </div>
                 </TableCell>
-                <TableCell className="font-mono text-sm text-right text-foreground">
-                  {trade.size.toLocaleString()}
+                <TableCell className="font-mono text-xs text-muted-foreground">
+                  {trade.direction}
                 </TableCell>
                 <TableCell className="font-mono text-sm text-right text-foreground">
-                  ${trade.price.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                  {trade.size.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                </TableCell>
+                <TableCell className="font-mono text-sm text-right text-foreground">
+                  ${trade.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
                 </TableCell>
                 <TableCell
                   className={`font-mono text-sm text-right font-medium ${
                     trade.pnl >= 0 ? "text-success" : "text-destructive"
                   }`}
                 >
-                  {trade.pnl >= 0 ? "+" : ""}${trade.pnl.toFixed(2)}
+                  {trade.pnl >= 0 ? "+" : ""}${trade.pnl.toFixed(4)}
                 </TableCell>
                 <TableCell className="font-mono text-xs text-right text-muted-foreground">
-                  ${trade.fee.toFixed(2)}
+                  ${trade.fee.toFixed(4)}
+                </TableCell>
+                <TableCell className="text-center">
+                  <a
+                    href={`https://app.hyperliquid.xyz/explorer/tx/${trade.hash}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="inline-flex items-center justify-center w-6 h-6 rounded hover:bg-primary/20 transition-colors"
+                    title="View on explorer"
+                  >
+                    <ExternalLink className="w-3 h-3 text-primary" />
+                  </a>
                 </TableCell>
               </motion.tr>
             ))}
           </TableBody>
         </Table>
       </div>
+
+      {trades.length === 0 && (
+        <div className="text-center py-8 text-muted-foreground font-mono text-sm">
+          No trades found for this address
+        </div>
+      )}
     </motion.div>
   );
 };
