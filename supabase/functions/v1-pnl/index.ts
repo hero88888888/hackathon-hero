@@ -1,18 +1,52 @@
 /**
  * PnL Endpoint (GET /v1-pnl)
- * 
- * Returns realized PnL and return percentage with capped normalization.
- * Implements the formula: returnPct = realizedPnl / effectiveCapital * 100
- * Where: effectiveCapital = min(equityAtStart, maxStartCapital)
+ * Returns realized PnL with capped normalization.
+ * Formula: returnPct = realizedPnl / min(startEquity, maxCap) * 100
  */
-
-import { createDataSource } from "../_shared/datasource.ts";
-import { normalizeFills, reconstructLifecycles, calculatePnL } from "../_shared/ledger-engine.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
+
+const HL_API_URL = "https://api.hyperliquid.xyz/info";
+
+interface HyperliquidFill {
+  coin: string;
+  px: string;
+  sz: string;
+  side: string;
+  time: number;
+  closedPnl: string;
+  fee: string;
+  builder?: string;
+  builderFee?: string;
+}
+
+interface ClearinghouseState {
+  marginSummary: { accountValue: string };
+  assetPositions: Array<{ position: { unrealizedPnl: string } }>;
+}
+
+async function fetchUserFills(user: string): Promise<HyperliquidFill[]> {
+  const res = await fetch(HL_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "userFills", user }),
+  });
+  if (!res.ok) throw new Error(`Failed to fetch fills: ${res.status}`);
+  return res.json();
+}
+
+async function fetchClearinghouseState(user: string): Promise<ClearinghouseState> {
+  const res = await fetch(HL_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "clearinghouseState", user }),
+  });
+  if (!res.ok) throw new Error(`Failed to fetch state: ${res.status}`);
+  return res.json();
+}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -26,16 +60,8 @@ Deno.serve(async (req) => {
     const fromMs = url.searchParams.get('fromMs');
     const toMs = url.searchParams.get('toMs');
     const builderOnly = url.searchParams.get('builderOnly') === 'true';
-    const maxStartCapitalParam = url.searchParams.get('maxStartCapital');
+    const maxCap = parseFloat(url.searchParams.get('maxStartCapital') || Deno.env.get('MAX_START_CAPITAL') || '10000');
     const targetBuilder = Deno.env.get('TARGET_BUILDER_TAG') || '';
-    const envMaxStartCapital = Deno.env.get('MAX_START_CAPITAL');
-    
-    // Priority: query param > env var > default
-    const maxStartCapital = maxStartCapitalParam 
-      ? parseFloat(maxStartCapitalParam) 
-      : envMaxStartCapital 
-        ? parseFloat(envMaxStartCapital) 
-        : 10000;
 
     if (!user) {
       return new Response(
@@ -44,77 +70,71 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Use datasource abstraction
-    const dataSource = createDataSource();
-    
-    // Fetch data in parallel
-    const [fills, clearinghouseState] = await Promise.all([
-      dataSource.fetchUserFills(user),
-      dataSource.fetchClearinghouseState(user),
+    const [fills, state] = await Promise.all([
+      fetchUserFills(user),
+      fetchClearinghouseState(user),
     ]);
 
-    // Normalize fills with builder attribution
-    const trades = normalizeFills(fills, targetBuilder);
+    // Filter fills
+    let filtered = [...fills];
+    if (coin) filtered = filtered.filter(f => f.coin === coin);
+    if (fromMs) filtered = filtered.filter(f => f.time >= parseInt(fromMs));
+    if (toMs) filtered = filtered.filter(f => f.time <= parseInt(toMs));
 
-    // Reconstruct lifecycles for taint-aware PnL calculation
-    const lifecycles = reconstructLifecycles(trades, targetBuilder);
+    // Calculate metrics
+    let hasBuilder = false;
+    let hasNonBuilder = false;
+    let realizedPnl = 0;
+    let feesPaid = 0;
+    let volume = 0;
+    let tradeCount = 0;
+    let builderCount = 0;
 
-    // Calculate PnL with capped normalization
-    const result = calculatePnL(
-      trades,
-      lifecycles,
-      clearinghouseState,
-      user,
-      coin,
-      fromMs ? parseInt(fromMs) : null,
-      toMs ? parseInt(toMs) : null,
-      builderOnly,
-      maxStartCapital
-    );
+    for (const fill of filtered) {
+      const isBuilder = targetBuilder
+        ? (fill.builder === targetBuilder || parseFloat(fill.builderFee || '0') > 0)
+        : !!(fill.builder || parseFloat(fill.builderFee || '0') > 0);
 
-    // Calculate lifecycle statistics
-    const relevantLifecycles = builderOnly 
-      ? lifecycles.filter(l => l.isBuilderOnly && !l.isTainted)
-      : lifecycles;
-    
-    const openLifecycles = relevantLifecycles.filter(l => l.status === 'open').length;
-    const closedLifecycles = relevantLifecycles.filter(l => l.status === 'closed').length;
-    const taintedLifecycles = lifecycles.filter(l => l.isTainted).length;
+      if (isBuilder) { hasBuilder = true; builderCount++; }
+      else hasNonBuilder = true;
+
+      if (builderOnly && !isBuilder) continue;
+
+      realizedPnl += parseFloat(fill.closedPnl);
+      feesPaid += parseFloat(fill.fee);
+      volume += parseFloat(fill.px) * parseFloat(fill.sz);
+      tradeCount++;
+    }
+
+    const tainted = builderOnly && hasBuilder && hasNonBuilder;
+    const currentEquity = parseFloat(state?.marginSummary?.accountValue || '0');
+    const unrealizedPnl = state?.assetPositions?.reduce(
+      (sum, ap) => sum + parseFloat(ap.position.unrealizedPnl || '0'), 0
+    ) || 0;
+
+    // Capped normalization
+    const startEquity = currentEquity - realizedPnl + feesPaid;
+    const effectiveCapital = Math.min(Math.max(startEquity, 100), maxCap);
+    const returnPct = effectiveCapital > 0 ? (realizedPnl / effectiveCapital) * 100 : 0;
 
     return new Response(
       JSON.stringify({
-        user: result.user,
-        coin: result.coin || 'all',
-        fromMs: result.fromMs,
-        toMs: result.toMs,
-        builderOnly: result.builderOnly,
-        maxStartCapital,
-        
-        // Core metrics
-        realizedPnl: result.realizedPnl,
-        unrealizedPnl: result.unrealizedPnl,
-        returnPct: result.returnPct,
-        
-        // Normalization details
-        effectiveCapital: result.effectiveCapital,
-        currentEquity: result.currentEquity,
-        
-        // Trade stats
-        feesPaid: result.feesPaid,
-        volume: result.volume,
-        tradeCount: result.tradeCount,
-        builderTradeCount: result.builderTradeCount,
-        
-        // Taint status
-        tainted: result.tainted,
-        
-        // Lifecycle stats
-        lifecycleStats: {
-          open: openLifecycles,
-          closed: closedLifecycles,
-          tainted: taintedLifecycles,
-          total: relevantLifecycles.length,
-        },
+        user,
+        coin: coin || 'all',
+        fromMs: fromMs ? parseInt(fromMs) : null,
+        toMs: toMs ? parseInt(toMs) : null,
+        builderOnly,
+        maxStartCapital: maxCap,
+        realizedPnl,
+        unrealizedPnl,
+        returnPct,
+        effectiveCapital,
+        currentEquity,
+        feesPaid,
+        volume,
+        tradeCount,
+        builderTradeCount: builderCount,
+        tainted,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );

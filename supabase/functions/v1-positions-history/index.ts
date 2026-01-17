@@ -1,17 +1,119 @@
 /**
  * Position History Endpoint (GET /v1-positions-history)
- * 
- * Returns time-ordered position states with taint detection.
- * Each state represents the position at a point in time.
+ * Returns time-ordered position states with lifecycle tracking.
  */
-
-import { createDataSource } from "../_shared/datasource.ts";
-import { normalizeFills, buildPositionHistory, reconstructLifecycles } from "../_shared/ledger-engine.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
+
+const HL_API_URL = "https://api.hyperliquid.xyz/info";
+
+interface HyperliquidFill {
+  coin: string;
+  px: string;
+  sz: string;
+  side: string;
+  time: number;
+  closedPnl: string;
+  fee: string;
+  hash: string;
+  builder?: string;
+  builderFee?: string;
+}
+
+async function fetchUserFills(user: string): Promise<HyperliquidFill[]> {
+  const response = await fetch(HL_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "userFills", user }),
+  });
+  if (!response.ok) throw new Error(`Failed to fetch fills: ${response.status}`);
+  return response.json();
+}
+
+interface PositionState {
+  timeMs: number;
+  coin: string;
+  netSize: number;
+  avgEntryPx: number;
+  side: string;
+  tainted: boolean;
+  builderOnly: boolean;
+}
+
+function buildPositionHistory(
+  fills: HyperliquidFill[],
+  targetBuilder: string,
+  builderOnly: boolean
+): PositionState[] {
+  const sorted = [...fills].sort((a, b) => a.time - b.time);
+  const byCoin: Record<string, HyperliquidFill[]> = {};
+  
+  for (const fill of sorted) {
+    if (!byCoin[fill.coin]) byCoin[fill.coin] = [];
+    byCoin[fill.coin].push(fill);
+  }
+
+  const states: PositionState[] = [];
+
+  for (const [coin, coinFills] of Object.entries(byCoin)) {
+    let netSize = 0;
+    let avgEntryPx = 0;
+    let totalCost = 0;
+    let hasBuilder = false;
+    let hasNonBuilder = false;
+
+    for (const fill of coinFills) {
+      const isBuilder = targetBuilder
+        ? (fill.builder === targetBuilder || parseFloat(fill.builderFee || '0') > 0)
+        : !!(fill.builder || parseFloat(fill.builderFee || '0') > 0);
+
+      if (isBuilder) hasBuilder = true;
+      else hasNonBuilder = true;
+
+      const sz = parseFloat(fill.sz);
+      const px = parseFloat(fill.px);
+      const dir = fill.side === 'B' ? 1 : -1;
+      const signed = sz * dir;
+
+      if ((netSize >= 0 && dir > 0) || (netSize <= 0 && dir < 0)) {
+        totalCost += px * sz;
+        netSize += signed;
+        avgEntryPx = Math.abs(netSize) > 0 ? totalCost / Math.abs(netSize) : 0;
+      } else {
+        const reduce = Math.min(Math.abs(netSize), sz);
+        totalCost -= avgEntryPx * reduce;
+        netSize += signed;
+        if (Math.abs(netSize) < 0.0001) {
+          netSize = 0;
+          avgEntryPx = 0;
+          totalCost = 0;
+          hasBuilder = false;
+          hasNonBuilder = false;
+        }
+      }
+
+      const tainted = hasBuilder && hasNonBuilder;
+      const isBuilderOnlyPos = hasBuilder && !hasNonBuilder;
+
+      if (builderOnly && (tainted || !isBuilderOnlyPos)) continue;
+
+      states.push({
+        timeMs: fill.time,
+        coin,
+        netSize,
+        avgEntryPx,
+        side: netSize > 0 ? 'long' : netSize < 0 ? 'short' : 'flat',
+        tainted,
+        builderOnly: isBuilderOnlyPos,
+      });
+    }
+  }
+
+  return states.sort((a, b) => b.timeMs - a.timeMs);
+}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -25,7 +127,6 @@ Deno.serve(async (req) => {
     const fromMs = url.searchParams.get('fromMs');
     const toMs = url.searchParams.get('toMs');
     const builderOnly = url.searchParams.get('builderOnly') === 'true';
-    const includeLifecycles = url.searchParams.get('includeLifecycles') === 'true';
     const targetBuilder = Deno.env.get('TARGET_BUILDER_TAG') || '';
 
     if (!user) {
@@ -35,48 +136,12 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Use datasource abstraction
-    const dataSource = createDataSource();
-    const fills = await dataSource.fetchUserFills(user);
+    const fills = await fetchUserFills(user);
+    let positions = buildPositionHistory(fills, targetBuilder, builderOnly);
 
-    // Normalize fills with builder attribution
-    const trades = normalizeFills(fills, targetBuilder);
-
-    // Build position history (time-ordered states)
-    let positions = buildPositionHistory(trades, targetBuilder, builderOnly);
-
-    // Apply filters
-    if (coin) {
-      positions = positions.filter(p => p.coin === coin);
-    }
-    if (fromMs) {
-      positions = positions.filter(p => p.timeMs >= parseInt(fromMs));
-    }
-    if (toMs) {
-      positions = positions.filter(p => p.timeMs <= parseInt(toMs));
-    }
-
-    // Optionally include full lifecycle data
-    let lifecycles = null;
-    if (includeLifecycles) {
-      lifecycles = reconstructLifecycles(trades, targetBuilder);
-      
-      // Filter lifecycles if builderOnly
-      if (builderOnly) {
-        lifecycles = lifecycles.filter(l => l.isBuilderOnly && !l.isTainted);
-      }
-      
-      // Apply coin/time filters to lifecycles
-      if (coin) {
-        lifecycles = lifecycles.filter(l => l.coin === coin);
-      }
-      if (fromMs) {
-        lifecycles = lifecycles.filter(l => l.startTime >= parseInt(fromMs));
-      }
-      if (toMs) {
-        lifecycles = lifecycles.filter(l => !l.endTime || l.endTime <= parseInt(toMs));
-      }
-    }
+    if (coin) positions = positions.filter(p => p.coin === coin);
+    if (fromMs) positions = positions.filter(p => p.timeMs >= parseInt(fromMs));
+    if (toMs) positions = positions.filter(p => p.timeMs <= parseInt(toMs));
 
     return new Response(
       JSON.stringify({
@@ -86,34 +151,7 @@ Deno.serve(async (req) => {
         toMs: toMs ? parseInt(toMs) : null,
         builderOnly,
         count: positions.length,
-        positions: positions.map(p => ({
-          timeMs: p.timeMs,
-          coin: p.coin,
-          netSize: p.netSize,
-          avgEntryPx: p.avgEntryPx,
-          side: p.side,
-          tainted: p.tainted,
-          builderOnly: p.builderOnly,
-        })),
-        ...(lifecycles && {
-          lifecycleCount: lifecycles.length,
-          lifecycles: lifecycles.map(l => ({
-            id: l.id,
-            coin: l.coin,
-            side: l.side,
-            startTime: l.startTime,
-            endTime: l.endTime,
-            avgEntryPx: l.avgEntryPx,
-            avgExitPx: l.avgExitPx,
-            maxSize: l.maxSize,
-            realizedPnl: l.realizedPnl,
-            feesPaid: l.feesPaid,
-            tradeCount: l.tradeCount,
-            isTainted: l.isTainted,
-            isBuilderOnly: l.isBuilderOnly,
-            status: l.status,
-          })),
-        }),
+        positions,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );

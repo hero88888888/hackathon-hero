@@ -1,4 +1,7 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+/**
+ * Deposits Endpoint (GET /v1-deposits) - Bonus Feature
+ * Tracks deposit history for fair competition filtering.
+ */
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -7,26 +10,21 @@ const corsHeaders = {
 
 const HL_API_URL = "https://api.hyperliquid.xyz/info";
 
-interface NonFundingDelta {
+interface LedgerUpdate {
   time: number;
   hash: string;
   usdc: string;
   type: string;
 }
 
-async function fetchUserNonFundingLedgerUpdates(user: string): Promise<NonFundingDelta[]> {
+async function fetchLedgerUpdates(user: string): Promise<LedgerUpdate[]> {
   const response = await fetch(HL_API_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ 
-      type: "userNonFundingLedgerUpdates", 
-      user,
-      startTime: 0 
-    }),
+    body: JSON.stringify({ type: "userNonFundingLedgerUpdates", user, startTime: 0 }),
   });
-  if (!response.ok) throw new Error(`Failed to fetch ledger updates: ${response.status}`);
-  const data = await response.json();
-  return data || [];
+  if (!response.ok) throw new Error(`Failed to fetch ledger: ${response.status}`);
+  return response.json() || [];
 }
 
 Deno.serve(async (req) => {
@@ -47,40 +45,29 @@ Deno.serve(async (req) => {
       );
     }
 
-    const ledgerUpdates = await fetchUserNonFundingLedgerUpdates(user);
+    const updates = await fetchLedgerUpdates(user);
 
-    // Filter for deposits (positive USDC transfers)
-    let deposits = ledgerUpdates
-      .filter(update => {
-        const usdc = parseFloat(update.usdc);
-        return usdc > 0 && (update.type === 'deposit' || update.type === 'internalTransfer');
-      })
-      .map(update => ({
-        timeMs: update.time,
-        amount: parseFloat(update.usdc),
-        txHash: update.hash,
-        type: update.type,
+    // Filter for deposits (positive USDC)
+    let deposits = updates
+      .filter(u => parseFloat(u.usdc) > 0 && (u.type === 'deposit' || u.type === 'internalTransfer'))
+      .map(u => ({
+        timeMs: u.time,
+        amount: parseFloat(u.usdc),
+        txHash: u.hash,
+        type: u.type,
       }));
 
-    // Apply time filters
-    if (fromMs) {
-      deposits = deposits.filter(d => d.timeMs >= parseInt(fromMs));
-    }
-    if (toMs) {
-      deposits = deposits.filter(d => d.timeMs <= parseInt(toMs));
-    }
+    if (fromMs) deposits = deposits.filter(d => d.timeMs >= parseInt(fromMs));
+    if (toMs) deposits = deposits.filter(d => d.timeMs <= parseInt(toMs));
 
-    // Sort by time descending
     deposits.sort((a, b) => b.timeMs - a.timeMs);
-
-    const totalDeposits = deposits.reduce((sum, d) => sum + d.amount, 0);
 
     return new Response(
       JSON.stringify({
         user,
         fromMs: fromMs ? parseInt(fromMs) : null,
         toMs: toMs ? parseInt(toMs) : null,
-        totalDeposits,
+        totalDeposits: deposits.reduce((s, d) => s + d.amount, 0),
         depositCount: deposits.length,
         deposits,
       }),
