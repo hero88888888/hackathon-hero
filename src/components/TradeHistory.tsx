@@ -55,10 +55,16 @@ export const TradeHistory = ({ trades, onTradeClick }: TradeHistoryProps) => {
                 PRICE
               </TableHead>
               <TableHead className="font-mono text-xs text-muted-foreground text-right">
+                NOTIONAL
+              </TableHead>
+              <TableHead className="font-mono text-xs text-muted-foreground text-right">
                 PNL
               </TableHead>
               <TableHead className="font-mono text-xs text-muted-foreground text-right">
                 FEE
+              </TableHead>
+              <TableHead className="font-mono text-xs text-muted-foreground text-center">
+                BUILDER
               </TableHead>
               <TableHead className="font-mono text-xs text-muted-foreground text-center">
                 TX
@@ -106,6 +112,9 @@ export const TradeHistory = ({ trades, onTradeClick }: TradeHistoryProps) => {
                 <TableCell className="font-mono text-sm text-right text-foreground">
                   ${trade.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
                 </TableCell>
+                <TableCell className="font-mono text-xs text-right text-muted-foreground">
+                  ${trade.notionalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </TableCell>
                 <TableCell
                   className={`font-mono text-sm text-right font-medium ${
                     trade.pnl >= 0 ? "text-success" : "text-destructive"
@@ -115,6 +124,15 @@ export const TradeHistory = ({ trades, onTradeClick }: TradeHistoryProps) => {
                 </TableCell>
                 <TableCell className="font-mono text-xs text-right text-muted-foreground">
                   ${trade.fee.toFixed(4)}
+                </TableCell>
+                <TableCell className="text-center">
+                  {trade.isBuilderTrade ? (
+                    <span className="inline-flex items-center justify-center w-6 h-6 rounded bg-primary/20" title="Builder trade">
+                      <span className="w-2 h-2 bg-primary rounded-full" />
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground/50">—</span>
+                  )}
                 </TableCell>
                 <TableCell className="text-center">
                   <a
