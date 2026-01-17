@@ -1,22 +1,16 @@
 import { motion } from "framer-motion";
 import { TrendingUp, TrendingDown, Activity, Percent, DollarSign, Wallet } from "lucide-react";
+import type { ProcessedStats } from "@/lib/hyperliquid";
 
 interface StatsCardsProps {
-  stats: {
-    totalTrades: number;
-    winRate: number;
-    totalVolume: number;
-    avgPnL: number;
-    bestTrade: number;
-    worstTrade: number;
-  };
+  stats: ProcessedStats;
 }
 
 export const StatsCards = ({ stats }: StatsCardsProps) => {
   const cards = [
     {
       label: "Total Trades",
-      value: stats.totalTrades.toString(),
+      value: stats.totalTrades.toLocaleString(),
       icon: Activity,
       color: "primary",
     },
@@ -27,16 +21,16 @@ export const StatsCards = ({ stats }: StatsCardsProps) => {
       color: stats.winRate >= 50 ? "success" : "destructive",
     },
     {
-      label: "Total Volume",
-      value: `$${(stats.totalVolume / 1000).toFixed(1)}k`,
-      icon: DollarSign,
+      label: "Account Value",
+      value: `$${stats.accountValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+      icon: Wallet,
       color: "primary",
     },
     {
-      label: "Avg PnL",
-      value: `${stats.avgPnL >= 0 ? "+" : ""}$${stats.avgPnL.toFixed(2)}`,
-      icon: Wallet,
-      color: stats.avgPnL >= 0 ? "success" : "destructive",
+      label: "Realized PnL",
+      value: `${stats.totalRealizedPnL >= 0 ? "+" : ""}$${stats.totalRealizedPnL.toFixed(2)}`,
+      icon: stats.totalRealizedPnL >= 0 ? TrendingUp : TrendingDown,
+      color: stats.totalRealizedPnL >= 0 ? "success" : "destructive",
     },
     {
       label: "Best Trade",
@@ -46,7 +40,7 @@ export const StatsCards = ({ stats }: StatsCardsProps) => {
     },
     {
       label: "Worst Trade",
-      value: `-$${Math.abs(stats.worstTrade).toFixed(2)}`,
+      value: `$${stats.worstTrade.toFixed(2)}`,
       icon: TrendingDown,
       color: "destructive",
     },

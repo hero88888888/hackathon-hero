@@ -1,41 +1,68 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { motion } from "framer-motion";
+import { toast } from "sonner";
 import { Header } from "@/components/Header";
 import { AddressInput } from "@/components/AddressInput";
 import { TradeHistory } from "@/components/TradeHistory";
 import { PnLChart } from "@/components/PnLChart";
 import { PositionHistory } from "@/components/PositionHistory";
 import { StatsCards } from "@/components/StatsCards";
+import { TradeDetailModal } from "@/components/TradeDetailModal";
 import {
-  generateMockTrades,
-  generateMockPnLData,
-  generateMockPositions,
-  generateMockStats,
-} from "@/lib/mockData";
+  fetchAddressData,
+  type ProcessedTrade,
+  type ProcessedPosition,
+  type ProcessedStats,
+  type PnLDataPoint,
+} from "@/lib/hyperliquid";
+
+const SAMPLE_ADDRESSES = [
+  "0x0e09b56ef137f417e424f1265425e93bfff77e17",
+  "0x186b7610ff3f2e3fd7985b95f525ee0e37a79a74",
+  "0x6c8031a9eb4415284f3f89c0420f697c87168263",
+];
 
 const Index = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [builderFilter, setBuilderFilter] = useState(false);
-  const [trades, setTrades] = useState<ReturnType<typeof generateMockTrades>>([]);
-  const [pnlData, setPnlData] = useState<ReturnType<typeof generateMockPnLData>>([]);
-  const [positions, setPositions] = useState<ReturnType<typeof generateMockPositions>>([]);
-  const [stats, setStats] = useState<ReturnType<typeof generateMockStats> | null>(null);
+  const [currentAddress, setCurrentAddress] = useState("");
+  const [trades, setTrades] = useState<ProcessedTrade[]>([]);
+  const [pnlData, setPnlData] = useState<PnLDataPoint[]>([]);
+  const [positions, setPositions] = useState<ProcessedPosition[]>([]);
+  const [stats, setStats] = useState<ProcessedStats | null>(null);
+  const [selectedTrade, setSelectedTrade] = useState<ProcessedTrade | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
 
   const handleSearch = async (address: string) => {
     setIsLoading(true);
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    setCurrentAddress(address);
     
-    setTrades(generateMockTrades());
-    setPnlData(generateMockPnLData());
-    setPositions(generateMockPositions());
-    setStats(generateMockStats());
-    setHasSearched(true);
-    setIsLoading(false);
+    try {
+      const data = await fetchAddressData(address, builderFilter);
+      
+      setTrades(data.trades);
+      setPnlData(data.pnlData);
+      setPositions(data.positions);
+      setStats(data.stats);
+      setHasSearched(true);
+      
+      toast.success(`Loaded ${data.trades.length} trades for ${address.slice(0, 8)}...`);
+    } catch (error) {
+      console.error("Error fetching data:", error);
+      toast.error("Failed to fetch data. Please check the address and try again.");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const totalPnL = pnlData.length > 0 ? pnlData[pnlData.length - 1].cumulative : 0;
+  const handleTradeClick = (trade: ProcessedTrade) => {
+    setSelectedTrade(trade);
+    setIsModalOpen(true);
+  };
+
+  const totalPnL = stats?.totalRealizedPnL || 0;
+  const totalPnLPercent = stats?.accountValue ? (totalPnL / stats.accountValue) * 100 : 0;
 
   return (
     <div className="min-h-screen bg-background">
@@ -60,7 +87,7 @@ const Index = () => {
               Complete trade history, position tracking, and cumulative PnL analytics
               — data that's missing from the public HL API.
             </p>
-            <div className="flex flex-wrap justify-center gap-4 text-sm font-mono">
+            <div className="flex flex-wrap justify-center gap-4 text-sm font-mono mb-8">
               <div className="flex items-center gap-2 px-4 py-2 bg-card rounded-lg border border-border">
                 <div className="w-2 h-2 bg-success rounded-full animate-pulse-slow" />
                 <span className="text-muted-foreground">Position History</span>
@@ -75,7 +102,25 @@ const Index = () => {
               </div>
               <div className="flex items-center gap-2 px-4 py-2 bg-card rounded-lg border border-border">
                 <div className="w-2 h-2 bg-success rounded-full animate-pulse-slow" />
-                <span className="text-muted-foreground">Leaderboards</span>
+                <span className="text-muted-foreground">Transaction Details</span>
+              </div>
+            </div>
+
+            {/* Sample Addresses */}
+            <div className="max-w-2xl mx-auto mb-8">
+              <p className="text-xs font-mono text-muted-foreground mb-3">
+                Try these sample addresses:
+              </p>
+              <div className="flex flex-wrap justify-center gap-2">
+                {SAMPLE_ADDRESSES.map((addr) => (
+                  <button
+                    key={addr}
+                    onClick={() => handleSearch(addr)}
+                    className="px-3 py-1.5 bg-card hover:bg-muted border border-border rounded-lg font-mono text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    {addr.slice(0, 8)}...{addr.slice(-6)}
+                  </button>
+                ))}
               </div>
             </div>
           </motion.div>
@@ -89,6 +134,13 @@ const Index = () => {
             builderFilter={builderFilter}
             onBuilderFilterChange={setBuilderFilter}
           />
+          
+          {hasSearched && (
+            <p className="text-center text-xs font-mono text-muted-foreground mt-2">
+              Showing data for:{" "}
+              <span className="text-primary">{currentAddress}</span>
+            </p>
+          )}
         </div>
 
         {/* Results */}
@@ -107,7 +159,7 @@ const Index = () => {
               <PnLChart
                 data={pnlData}
                 totalPnL={totalPnL}
-                totalPnLPercent={(totalPnL / 10000) * 100}
+                totalPnLPercent={totalPnLPercent}
               />
 
               {/* Position History */}
@@ -115,7 +167,7 @@ const Index = () => {
             </div>
 
             {/* Trade History */}
-            <TradeHistory trades={trades} />
+            <TradeHistory trades={trades} onTradeClick={handleTradeClick} />
           </motion.div>
         )}
 
@@ -128,11 +180,18 @@ const Index = () => {
           >
             <div className="w-16 h-16 border-4 border-primary/30 border-t-primary rounded-full animate-spin mb-4" />
             <p className="text-muted-foreground font-mono">
-              Fetching trade data...
+              Fetching trade data from Hyperliquid...
             </p>
           </motion.div>
         )}
       </main>
+
+      {/* Trade Detail Modal */}
+      <TradeDetailModal
+        trade={selectedTrade}
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+      />
 
       {/* Footer */}
       <footer className="border-t border-border mt-12">
