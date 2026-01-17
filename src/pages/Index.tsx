@@ -6,6 +6,7 @@ import { AddressInput } from "@/components/AddressInput";
 import { TradeHistory } from "@/components/TradeHistory";
 import { PnLChart } from "@/components/PnLChart";
 import { PositionHistory } from "@/components/PositionHistory";
+import { PositionLifecycleHistory } from "@/components/PositionLifecycleHistory";
 import { StatsCards } from "@/components/StatsCards";
 import { TradeDetailModal } from "@/components/TradeDetailModal";
 import {
@@ -14,6 +15,7 @@ import {
   type ProcessedPosition,
   type ProcessedStats,
   type PnLDataPoint,
+  type PositionLifecycle,
 } from "@/lib/hyperliquid";
 
 const SAMPLE_ADDRESSES = [
@@ -30,6 +32,7 @@ const Index = () => {
   const [trades, setTrades] = useState<ProcessedTrade[]>([]);
   const [pnlData, setPnlData] = useState<PnLDataPoint[]>([]);
   const [positions, setPositions] = useState<ProcessedPosition[]>([]);
+  const [positionLifecycles, setPositionLifecycles] = useState<PositionLifecycle[]>([]);
   const [stats, setStats] = useState<ProcessedStats | null>(null);
   const [selectedTrade, setSelectedTrade] = useState<ProcessedTrade | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -44,10 +47,14 @@ const Index = () => {
       setTrades(data.trades);
       setPnlData(data.pnlData);
       setPositions(data.positions);
+      setPositionLifecycles(data.positionLifecycles);
       setStats(data.stats);
       setHasSearched(true);
       
-      toast.success(`Loaded ${data.trades.length} trades for ${address.slice(0, 8)}...`);
+      const builderInfo = builderFilter 
+        ? ` (${data.stats.builderTradeCount} builder trades)`
+        : "";
+      toast.success(`Loaded ${data.trades.length} trades${builderInfo} for ${address.slice(0, 8)}...`);
     } catch (error) {
       console.error("Error fetching data:", error);
       toast.error("Failed to fetch data. Please check the address and try again.");
@@ -62,7 +69,7 @@ const Index = () => {
   };
 
   const totalPnL = stats?.totalRealizedPnL || 0;
-  const totalPnLPercent = stats?.accountValue ? (totalPnL / stats.accountValue) * 100 : 0;
+  const totalPnLPercent = stats?.returnPct || 0;
 
   return (
     <div className="min-h-screen bg-background">
@@ -150,8 +157,7 @@ const Index = () => {
             animate={{ opacity: 1 }}
             className="space-y-6"
           >
-            {/* Stats Overview */}
-            <StatsCards stats={stats} />
+            <StatsCards stats={stats} builderOnly={builderFilter} />
 
             {/* Main Content Grid */}
             <div className="grid lg:grid-cols-2 gap-6">
@@ -162,9 +168,15 @@ const Index = () => {
                 totalPnLPercent={totalPnLPercent}
               />
 
-              {/* Position History */}
+              {/* Active Positions */}
               <PositionHistory positions={positions} />
             </div>
+
+            {/* Position Lifecycle History */}
+            <PositionLifecycleHistory 
+              lifecycles={positionLifecycles} 
+              builderOnly={builderFilter}
+            />
 
             {/* Trade History */}
             <TradeHistory trades={trades} onTradeClick={handleTradeClick} />

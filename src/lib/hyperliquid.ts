@@ -67,6 +67,8 @@ export interface ProcessedTrade {
   builderFee: number;
   hash: string;
   rawTime: number;
+  notionalValue: number;
+  isBuilderTrade: boolean;
 }
 
 export interface ProcessedPosition {
@@ -88,6 +90,22 @@ export interface ProcessedPosition {
   returnOnEquity: number;
 }
 
+export interface PositionLifecycle {
+  id: string;
+  coin: string;
+  side: "long" | "short";
+  openTime: string;
+  closeTime: string | null;
+  openPrice: number;
+  closePrice: number | null;
+  maxSize: number;
+  realizedPnl: number;
+  status: "open" | "closed";
+  tradeCount: number;
+  tainted: boolean;
+  avgEntryPx: number;
+}
+
 export interface ProcessedStats {
   totalTrades: number;
   winRate: number;
@@ -99,6 +117,10 @@ export interface ProcessedStats {
   totalUnrealizedPnL: number;
   totalFees: number;
   accountValue: number;
+  returnPct: number;
+  tradeCount: number;
+  tainted: boolean;
+  builderTradeCount: number;
 }
 
 export interface PnLDataPoint {
@@ -149,26 +171,34 @@ export async function fetchClearinghouseState(address: string): Promise<Clearing
 
 // Process fills into trades
 export function processFillsToTrades(fills: HyperliquidFill[]): ProcessedTrade[] {
-  return fills.map((fill, index) => ({
-    id: `trade-${fill.tid || index}`,
-    timestamp: new Date(fill.time).toLocaleString("en-US", {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    }),
-    coin: fill.coin,
-    side: fill.side === "B" ? "long" : "short",
-    direction: fill.dir,
-    size: parseFloat(fill.sz),
-    price: parseFloat(fill.px),
-    pnl: parseFloat(fill.closedPnl),
-    fee: parseFloat(fill.fee || "0"),
-    builderFee: parseFloat(fill.builderFee || "0"),
-    hash: fill.hash,
-    rawTime: fill.time,
-  }));
+  return fills.map((fill, index) => {
+    const size = parseFloat(fill.sz);
+    const price = parseFloat(fill.px);
+    const builderFee = parseFloat(fill.builderFee || "0");
+    
+    return {
+      id: `trade-${fill.tid || index}`,
+      timestamp: new Date(fill.time).toLocaleString("en-US", {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      }),
+      coin: fill.coin,
+      side: fill.side === "B" ? "long" : "short",
+      direction: fill.dir,
+      size,
+      price,
+      pnl: parseFloat(fill.closedPnl),
+      fee: parseFloat(fill.fee || "0"),
+      builderFee,
+      hash: fill.hash,
+      rawTime: fill.time,
+      notionalValue: size * price,
+      isBuilderTrade: builderFee > 0,
+    };
+  });
 }
 
 // Process positions from clearinghouse state
@@ -199,20 +229,34 @@ export function processPositions(state: ClearinghouseState): ProcessedPosition[]
 }
 
 // Calculate stats from trades and positions
+// Implements capped normalization for returnPct as per hackathon spec
 export function calculateStats(
   trades: ProcessedTrade[],
   positions: ProcessedPosition[],
-  state: ClearinghouseState | null
+  state: ClearinghouseState | null,
+  builderOnly: boolean = false,
+  maxStartCapital: number = 10000 // Default cap for fair comparison
 ): ProcessedStats {
   const winningTrades = trades.filter((t) => t.pnl > 0).length;
-  const totalVolume = trades.reduce((sum, t) => sum + t.size * t.price, 0);
+  const totalVolume = trades.reduce((sum, t) => sum + t.notionalValue, 0);
   const totalRealizedPnL = trades.reduce((sum, t) => sum + t.pnl, 0);
   const totalUnrealizedPnL = positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
   const totalFees = trades.reduce((sum, t) => sum + t.fee + t.builderFee, 0);
   const pnls = trades.map((t) => t.pnl);
+  const builderTradeCount = trades.filter((t) => t.isBuilderTrade).length;
+  
+  // Calculate effective capital for returnPct (capped normalization)
+  const accountValue = state ? parseFloat(state.marginSummary.accountValue) : 0;
+  const effectiveCapital = Math.min(accountValue || maxStartCapital, maxStartCapital);
+  const returnPct = effectiveCapital > 0 ? (totalRealizedPnL / effectiveCapital) * 100 : 0;
+  
+  // Taint detection: if builderOnly mode and there are non-builder trades affecting same positions
+  const hasNonBuilderTrades = trades.some((t) => !t.isBuilderTrade);
+  const tainted = builderOnly && hasNonBuilderTrades && builderTradeCount > 0;
   
   return {
     totalTrades: trades.length,
+    tradeCount: trades.length,
     winRate: trades.length > 0 ? (winningTrades / trades.length) * 100 : 0,
     totalVolume,
     avgPnL: trades.length > 0 ? totalRealizedPnL / trades.length : 0,
@@ -221,7 +265,10 @@ export function calculateStats(
     totalRealizedPnL,
     totalUnrealizedPnL,
     totalFees,
-    accountValue: state ? parseFloat(state.marginSummary.accountValue) : 0,
+    accountValue,
+    returnPct,
+    tainted,
+    builderTradeCount,
   };
 }
 
@@ -254,6 +301,101 @@ export function generatePnLData(trades: ProcessedTrade[]): PnLDataPoint[] {
   return data;
 }
 
+// Build position lifecycle history from trades
+export function buildPositionLifecycles(
+  trades: ProcessedTrade[],
+  builderOnly: boolean = false
+): PositionLifecycle[] {
+  const sortedTrades = [...trades].sort((a, b) => a.rawTime - b.rawTime);
+  const lifecycles: PositionLifecycle[] = [];
+  const activePositions: Map<string, {
+    trades: ProcessedTrade[];
+    side: "long" | "short";
+    netSize: number;
+  }> = new Map();
+  
+  sortedTrades.forEach((trade) => {
+    const key = trade.coin;
+    let position = activePositions.get(key);
+    
+    // Determine size change (positive for buys, negative for sells)
+    const sizeChange = trade.side === "long" ? trade.size : -trade.size;
+    
+    if (!position) {
+      // Start new position lifecycle
+      position = {
+        trades: [trade],
+        side: trade.side,
+        netSize: sizeChange,
+      };
+      activePositions.set(key, position);
+    } else {
+      position.trades.push(trade);
+      position.netSize += sizeChange;
+      
+      // Check if position closed (netSize returned to ~0)
+      if (Math.abs(position.netSize) < 0.0001) {
+        // Position lifecycle complete
+        const firstTrade = position.trades[0];
+        const lastTrade = position.trades[position.trades.length - 1];
+        const realizedPnl = position.trades.reduce((sum, t) => sum + t.pnl, 0);
+        const maxSize = Math.max(...position.trades.map((t) => t.size));
+        const hasNonBuilderTrades = position.trades.some((t) => !t.isBuilderTrade);
+        const hasBuilderTrades = position.trades.some((t) => t.isBuilderTrade);
+        
+        lifecycles.push({
+          id: `lifecycle-${firstTrade.rawTime}`,
+          coin: key,
+          side: position.side,
+          openTime: firstTrade.timestamp,
+          closeTime: lastTrade.timestamp,
+          openPrice: firstTrade.price,
+          closePrice: lastTrade.price,
+          maxSize,
+          realizedPnl,
+          status: "closed",
+          tradeCount: position.trades.length,
+          tainted: builderOnly && hasNonBuilderTrades && hasBuilderTrades,
+          avgEntryPx: position.trades.reduce((sum, t) => sum + t.price, 0) / position.trades.length,
+        });
+        
+        activePositions.delete(key);
+      }
+    }
+  });
+  
+  // Add remaining open positions
+  activePositions.forEach((position, coin) => {
+    const firstTrade = position.trades[0];
+    const realizedPnl = position.trades.reduce((sum, t) => sum + t.pnl, 0);
+    const maxSize = Math.max(...position.trades.map((t) => t.size));
+    const hasNonBuilderTrades = position.trades.some((t) => !t.isBuilderTrade);
+    const hasBuilderTrades = position.trades.some((t) => t.isBuilderTrade);
+    
+    lifecycles.push({
+      id: `lifecycle-${firstTrade.rawTime}`,
+      coin,
+      side: position.side,
+      openTime: firstTrade.timestamp,
+      closeTime: null,
+      openPrice: firstTrade.price,
+      closePrice: null,
+      maxSize,
+      realizedPnl,
+      status: "open",
+      tradeCount: position.trades.length,
+      tainted: builderOnly && hasNonBuilderTrades && hasBuilderTrades,
+      avgEntryPx: position.trades.reduce((sum, t) => sum + t.price, 0) / position.trades.length,
+    });
+  });
+  
+  return lifecycles.sort((a, b) => {
+    const timeA = new Date(a.openTime).getTime();
+    const timeB = new Date(b.openTime).getTime();
+    return timeB - timeA; // Most recent first
+  });
+}
+
 // Main function to fetch all data for an address
 export async function fetchAddressData(address: string, builderOnly: boolean = false) {
   const [fills, state] = await Promise.all([
@@ -261,25 +403,28 @@ export async function fetchAddressData(address: string, builderOnly: boolean = f
     fetchClearinghouseState(address),
   ]);
   
-  let processedFills = fills;
+  // Process ALL fills for position lifecycle tracking (to detect taint)
+  const allTrades = processFillsToTrades(fills);
+  
+  let filteredTrades = allTrades;
   
   // Filter for builder fills only if requested
   if (builderOnly) {
-    processedFills = fills.filter(
-      (fill) => fill.builderFee && parseFloat(fill.builderFee) > 0
-    );
+    filteredTrades = allTrades.filter((trade) => trade.isBuilderTrade);
   }
   
-  const trades = processFillsToTrades(processedFills);
   const positions = processPositions(state);
-  const stats = calculateStats(trades, positions, state);
-  const pnlData = generatePnLData(trades);
+  const stats = calculateStats(allTrades, positions, state, builderOnly);
+  const pnlData = generatePnLData(filteredTrades);
+  const positionLifecycles = buildPositionLifecycles(allTrades, builderOnly);
   
   return {
-    trades,
+    trades: filteredTrades,
+    allTrades, // Include all trades for validation
     positions,
     stats,
     pnlData,
+    positionLifecycles,
     rawFills: fills,
     rawState: state,
   };
