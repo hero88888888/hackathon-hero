@@ -1,0 +1,69 @@
+# Hyperliquid Trade Ledger API - Docker Compose Configuration
+#
+# Quick Start:
+#   docker-compose up -d
+#
+# Access:
+#   - API: http://localhost:8080
+#   - Health: http://localhost:8080/health
+#   - Docs: http://localhost:8080/docs
+#
+# Example Requests:
+#   curl "http://localhost:8080/v1-trades?user=0x0e09b56ef137f417e424f1265425e93bfff77e17"
+#   curl "http://localhost:8080/v1-pnl?user=0x0e09b56ef137f417e424f1265425e93bfff77e17&builderOnly=true"
+#   curl "http://localhost:8080/v1-leaderboard?metric=returnPct&builderOnly=true"
+
+version: '3.8'
+
+services:
+  trade-ledger-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hl-trade-ledger-api
+    ports:
+      - "8080:8080"
+    environment:
+      # Builder Attribution Configuration
+      # Set to your builder address to filter builder-only trades
+      - TARGET_BUILDER_TAG=${TARGET_BUILDER_TAG:-}
+      
+      # Capped Normalization for PnL Calculation
+      # Limits the denominator for fair return% comparison
+      - MAX_START_CAPITAL=${MAX_START_CAPITAL:-10000}
+      
+      # Data Source Selection
+      # Options: public, insilico, hyperserve
+      - DATASOURCE_TYPE=${DATASOURCE_TYPE:-public}
+      
+      # Server Port
+      - PORT=8080
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: PostgreSQL for caching (disabled by default)
+  # Uncomment to enable persistent storage
+  # 
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: hl-trade-ledger-db
+  #   environment:
+  #     - POSTGRES_DB=trade_ledger
+  #     - POSTGRES_USER=ledger
+  #     - POSTGRES_PASSWORD=ledger_password
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+
+# volumes:
+#   postgres_data:
+
+networks:
+  default:
+    name: hl-trade-ledger-network

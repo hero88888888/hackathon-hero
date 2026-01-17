@@ -1,40 +1,17 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+/**
+ * Trade History Endpoint (GET /v1-trades)
+ * 
+ * Returns normalized list of fills for a specific user.
+ * Implements strict builder-only filtering with taint detection.
+ */
+
+import { createDataSource } from "../_shared/datasource.ts";
+import { normalizeFills, reconstructLifecycles, filterTradesForOutput } from "../_shared/ledger-engine.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
-
-const HL_API_URL = "https://api.hyperliquid.xyz/info";
-
-interface HyperliquidFill {
-  coin: string;
-  px: string;
-  sz: string;
-  side: string;
-  time: number;
-  startPosition: string;
-  dir: string;
-  closedPnl: string;
-  hash: string;
-  oid: number;
-  crossed: boolean;
-  fee: string;
-  tid: number;
-  feeToken: string;
-  builderFee?: string;
-  builder?: string;
-}
-
-async function fetchUserFills(user: string): Promise<HyperliquidFill[]> {
-  const response = await fetch(HL_API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "userFills", user }),
-  });
-  if (!response.ok) throw new Error(`Failed to fetch fills: ${response.status}`);
-  return response.json();
-}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -57,33 +34,14 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Fetch from Hyperliquid API
-    const fills = await fetchUserFills(user);
+    // Use datasource abstraction
+    const dataSource = createDataSource();
+    const fills = await dataSource.fetchUserFills(user);
 
-    // Process and filter fills
-    let trades = fills.map(fill => {
-      const isBuilderTrade = targetBuilder ? 
-        (fill.builder === targetBuilder || (fill.builderFee && parseFloat(fill.builderFee) > 0)) : 
-        !!(fill.builder || (fill.builderFee && parseFloat(fill.builderFee) > 0));
+    // Normalize fills with builder attribution
+    let trades = normalizeFills(fills, targetBuilder);
 
-      return {
-        timeMs: fill.time,
-        coin: fill.coin,
-        side: fill.side,
-        px: parseFloat(fill.px),
-        sz: parseFloat(fill.sz),
-        fee: parseFloat(fill.fee),
-        closedPnl: parseFloat(fill.closedPnl),
-        notionalValue: parseFloat(fill.px) * parseFloat(fill.sz),
-        hash: fill.hash,
-        oid: fill.oid,
-        tid: fill.tid,
-        builder: fill.builder || null,
-        isBuilderTrade,
-      };
-    });
-
-    // Apply filters
+    // Apply time/coin filters BEFORE lifecycle reconstruction
     if (coin) {
       trades = trades.filter(t => t.coin === coin);
     }
@@ -93,12 +51,24 @@ Deno.serve(async (req) => {
     if (toMs) {
       trades = trades.filter(t => t.timeMs <= parseInt(toMs));
     }
+
+    // For builderOnly mode, we need lifecycle-aware filtering
+    // to properly handle the taint virus effect
+    let outputTrades = trades;
     if (builderOnly) {
-      trades = trades.filter(t => t.isBuilderTrade);
+      // Reconstruct lifecycles to detect tainting
+      const lifecycles = reconstructLifecycles(trades, targetBuilder);
+      // Filter out trades from tainted lifecycles AND non-builder trades
+      outputTrades = filterTradesForOutput(trades, lifecycles, true);
     }
 
-    // Sort by time descending
-    trades.sort((a, b) => b.timeMs - a.timeMs);
+    // Sort by time descending (most recent first)
+    outputTrades.sort((a, b) => b.timeMs - a.timeMs);
+
+    // Calculate aggregate stats for response
+    const totalVolume = outputTrades.reduce((sum, t) => sum + t.notionalValue, 0);
+    const totalPnl = outputTrades.reduce((sum, t) => sum + t.closedPnl, 0);
+    const totalFees = outputTrades.reduce((sum, t) => sum + t.fee, 0);
 
     return new Response(
       JSON.stringify({
@@ -107,8 +77,26 @@ Deno.serve(async (req) => {
         fromMs: fromMs ? parseInt(fromMs) : null,
         toMs: toMs ? parseInt(toMs) : null,
         builderOnly,
-        count: trades.length,
-        trades,
+        targetBuilder: targetBuilder || null,
+        count: outputTrades.length,
+        totalVolume,
+        totalPnl,
+        totalFees,
+        trades: outputTrades.map(t => ({
+          timeMs: t.timeMs,
+          coin: t.coin,
+          side: t.side,
+          px: t.px,
+          sz: t.sz,
+          fee: t.fee,
+          closedPnl: t.closedPnl,
+          notionalValue: t.notionalValue,
+          hash: t.hash,
+          oid: t.oid,
+          tid: t.tid,
+          builder: t.builder,
+          isBuilderTrade: t.isBuilderTrade,
+        })),
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
