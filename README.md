@@ -27,7 +27,7 @@ https://vgfmhpatwxkcmqzdvnch.supabase.co/functions/v1
 | Endpoint | Description |
 |----------|-------------|
 | `GET /v1-trades` | Trade history with builder attribution |
-| `GET /v1-positions-history` | Time-ordered position states |
+| `GET /v1-positions-history` | Time-ordered position states + lifecycles |
 | `GET /v1-pnl` | Realized PnL with capped normalization |
 | `GET /v1-leaderboard` | Ranked users by metric |
 | `GET /v1-deposits` | Deposit tracking (bonus) |
@@ -56,7 +56,7 @@ curl "https://vgfmhpatwxkcmqzdvnch.supabase.co/functions/v1/v1-pnl?user=0x0e09b5
 curl "https://vgfmhpatwxkcmqzdvnch.supabase.co/functions/v1/v1-leaderboard?metric=returnPct"
 ```
 
-## 🔧 Key Features
+## 🔧 Core Features
 
 ### 1. Taint Detection
 If ANY trade in a position lifecycle is non-builder-attributed, the entire lifecycle is marked **tainted** and excluded from builder-only aggregates.
@@ -71,6 +71,74 @@ effectiveCapital = min(max(startEquity, 100), maxStartCapital)
 - Lifecycle starts when `netSize` moves from 0 → non-zero
 - Lifecycle ends when `netSize` returns to 0
 - Tracks avg entry price, max size, realized PnL
+
+## ✨ Bonus Features
+
+| Feature | Endpoint | Description |
+|---------|----------|-------------|
+| **Risk Fields** | `/v1-positions-history` | `liqPx`, `marginUsed`, `leverage` on positions |
+| **Position Flips** | `/v1-positions-history` | Detects long→short and short→long reversals |
+| **Multi-Coin Aggregation** | All endpoints | Per-coin breakdown of volume/pnl/trades |
+| **Win Rate** | `/v1-trades`, `/v1-leaderboard` | Win/loss tracking with percentages |
+| **Profit Factor** | `/v1-leaderboard` | Gross profit / gross loss ratio |
+| **Deposit Tracking** | `/v1-deposits` | Net deposits, withdrawals, time series |
+| **Best/Worst Trade** | `/v1-leaderboard` | Per-user trade extremes |
+
+## 📊 Response Examples
+
+### /v1-positions-history (with bonus fields)
+```json
+{
+  "positions": [{
+    "timeMs": 1234567890,
+    "coin": "BTC",
+    "netSize": 0.5,
+    "avgEntryPx": 65000,
+    "side": "long",
+    "liqPx": 45000,
+    "marginUsed": 3250,
+    "leverage": 10,
+    "flipped": false,
+    "flipType": null
+  }],
+  "lifecycles": [{
+    "coin": "ETH",
+    "side": "long",
+    "realizedPnl": 1500,
+    "flips": 1,
+    "status": "closed"
+  }],
+  "coinSummary": {
+    "BTC": { "volume": 500000, "realizedPnl": 2500 },
+    "ETH": { "volume": 250000, "realizedPnl": 1500 }
+  },
+  "totalFlips": 3
+}
+```
+
+### /v1-leaderboard (with bonus fields)
+```json
+{
+  "leaderboard": [{
+    "rank": 1,
+    "user": "0x...",
+    "pnl": 50000,
+    "returnPct": 250,
+    "winRate": 65.5,
+    "profitFactor": 2.3,
+    "bestTrade": 5000,
+    "worstTrade": -1200,
+    "coinBreakdown": {
+      "BTC": { "volume": 1000000, "pnl": 30000 }
+    }
+  }],
+  "aggregateStats": {
+    "totalVolume": 5000000,
+    "totalPnl": 150000,
+    "avgWinRate": 58.3
+  }
+}
+```
 
 ## 🐳 Docker
 
@@ -94,15 +162,24 @@ docker-compose up -d
 
 ```
 ├── supabase/functions/
-│   ├── v1-trades/          # Trade history endpoint
-│   ├── v1-positions-history/ # Position state tracking
-│   ├── v1-pnl/             # PnL with capped normalization
-│   ├── v1-leaderboard/     # Competitive rankings
-│   └── v1-deposits/        # Deposit tracking (bonus)
+│   ├── v1-trades/          # Trade history + coin breakdown
+│   ├── v1-positions-history/ # Lifecycles + flips + risk fields
+│   ├── v1-pnl/             # Capped normalization
+│   ├── v1-leaderboard/     # Rankings + profit factor
+│   └── v1-deposits/        # Fair competition filtering
 ├── src/                    # React dashboard
 ├── Dockerfile
 └── docker-compose.yml
 ```
+
+## 🏆 Hackathon Criteria
+
+| Criterion | Weight | Implementation |
+|-----------|--------|----------------|
+| **Correctness** | 50% | Capped normalization, sequential lifecycle tracking |
+| **Builder-Only** | 20% | Strict taint propagation across lifecycles |
+| **Completeness** | 20% | All required endpoints + bonus features |
+| **Demo Clarity** | 10% | Live dashboard with taint visualization |
 
 ## 📝 License
 

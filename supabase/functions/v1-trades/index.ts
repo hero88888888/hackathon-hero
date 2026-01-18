@@ -1,6 +1,11 @@
 /**
  * Trade History Endpoint (GET /v1-trades)
  * Returns normalized list of fills for a specific user.
+ * 
+ * BONUS FEATURES:
+ * - Position direction tracking (dir field)
+ * - Multi-coin aggregation per coin breakdown
+ * - Enhanced trade metadata
  */
 
 const corsHeaders = {
@@ -73,6 +78,7 @@ Deno.serve(async (req) => {
         timeMs: fill.time,
         coin: fill.coin,
         side: fill.side,
+        dir: fill.dir, // Open Long, Close Short, etc.
         px: parseFloat(fill.px),
         sz: parseFloat(fill.sz),
         fee: parseFloat(fill.fee),
@@ -81,6 +87,8 @@ Deno.serve(async (req) => {
         hash: fill.hash,
         oid: fill.oid,
         tid: fill.tid,
+        crossed: fill.crossed, // Crossed the spread (taker)
+        startPosition: parseFloat(fill.startPosition),
         builder: fill.builder || null,
         builderFee,
         isBuilderTrade,
@@ -96,6 +104,23 @@ Deno.serve(async (req) => {
     // Sort by time descending
     trades.sort((a, b) => b.timeMs - a.timeMs);
 
+    // Multi-coin aggregation
+    const coinBreakdown: Record<string, { volume: number; pnl: number; fees: number; count: number }> = {};
+    for (const t of trades) {
+      if (!coinBreakdown[t.coin]) {
+        coinBreakdown[t.coin] = { volume: 0, pnl: 0, fees: 0, count: 0 };
+      }
+      coinBreakdown[t.coin].volume += t.notionalValue;
+      coinBreakdown[t.coin].pnl += t.closedPnl;
+      coinBreakdown[t.coin].fees += t.fee;
+      coinBreakdown[t.coin].count++;
+    }
+
+    // Calculate win stats
+    const winningTrades = trades.filter(t => t.closedPnl > 0).length;
+    const losingTrades = trades.filter(t => t.closedPnl < 0).length;
+    const winRate = trades.length > 0 ? (winningTrades / trades.length) * 100 : 0;
+
     return new Response(
       JSON.stringify({
         user,
@@ -106,6 +131,14 @@ Deno.serve(async (req) => {
         count: trades.length,
         totalVolume: trades.reduce((s, t) => s + t.notionalValue, 0),
         totalPnl: trades.reduce((s, t) => s + t.closedPnl, 0),
+        totalFees: trades.reduce((s, t) => s + t.fee, 0),
+        // Bonus: Win/loss stats
+        winningTrades,
+        losingTrades,
+        winRate,
+        // Bonus: Multi-coin breakdown
+        coinBreakdown,
+        uniqueCoins: Object.keys(coinBreakdown).length,
         trades,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
