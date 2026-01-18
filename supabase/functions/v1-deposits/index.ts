@@ -1,6 +1,12 @@
 /**
  * Deposits Endpoint (GET /v1-deposits) - Bonus Feature
- * Tracks deposit history for fair competition filtering.
+ * Tracks deposit/withdrawal history for fair competition filtering.
+ * 
+ * BONUS FEATURES:
+ * - Net deposits calculation
+ * - Withdrawal tracking
+ * - Internal transfer detection
+ * - Time-series deposit flow
  */
 
 const corsHeaders = {
@@ -15,6 +21,7 @@ interface LedgerUpdate {
   hash: string;
   usdc: string;
   type: string;
+  fee?: string;
 }
 
 async function fetchLedgerUpdates(user: string): Promise<LedgerUpdate[]> {
@@ -47,29 +54,93 @@ Deno.serve(async (req) => {
 
     const updates = await fetchLedgerUpdates(user);
 
-    // Filter for deposits (positive USDC)
-    let deposits = updates
-      .filter(u => parseFloat(u.usdc) > 0 && (u.type === 'deposit' || u.type === 'internalTransfer'))
-      .map(u => ({
+    // Process all fund movements
+    let deposits: any[] = [];
+    let withdrawals: any[] = [];
+    let internalTransfers: any[] = [];
+
+    for (const u of updates) {
+      const amount = parseFloat(u.usdc);
+      const entry = {
         timeMs: u.time,
-        amount: parseFloat(u.usdc),
+        amount: Math.abs(amount),
         txHash: u.hash,
         type: u.type,
-      }));
+        fee: parseFloat(u.fee || '0'),
+      };
 
-    if (fromMs) deposits = deposits.filter(d => d.timeMs >= parseInt(fromMs));
-    if (toMs) deposits = deposits.filter(d => d.timeMs <= parseInt(toMs));
+      if (u.type === 'deposit' || (u.type === 'internalTransfer' && amount > 0)) {
+        deposits.push({ ...entry, direction: 'in' });
+      } else if (u.type === 'withdraw' || (u.type === 'internalTransfer' && amount < 0)) {
+        withdrawals.push({ ...entry, direction: 'out', amount: Math.abs(amount) });
+      }
 
+      if (u.type === 'internalTransfer') {
+        internalTransfers.push(entry);
+      }
+    }
+
+    // Apply time filters
+    if (fromMs) {
+      const from = parseInt(fromMs);
+      deposits = deposits.filter(d => d.timeMs >= from);
+      withdrawals = withdrawals.filter(d => d.timeMs >= from);
+      internalTransfers = internalTransfers.filter(d => d.timeMs >= from);
+    }
+    if (toMs) {
+      const to = parseInt(toMs);
+      deposits = deposits.filter(d => d.timeMs <= to);
+      withdrawals = withdrawals.filter(d => d.timeMs <= to);
+      internalTransfers = internalTransfers.filter(d => d.timeMs <= to);
+    }
+
+    // Sort by time (most recent first)
     deposits.sort((a, b) => b.timeMs - a.timeMs);
+    withdrawals.sort((a, b) => b.timeMs - a.timeMs);
+    internalTransfers.sort((a, b) => b.timeMs - a.timeMs);
+
+    const totalDeposits = deposits.reduce((s, d) => s + d.amount, 0);
+    const totalWithdrawals = withdrawals.reduce((s, d) => s + d.amount, 0);
+    const netDeposits = totalDeposits - totalWithdrawals;
+
+    // Time-series flow (daily aggregation)
+    const dailyFlow: Record<string, { deposits: number; withdrawals: number; net: number }> = {};
+    for (const d of deposits) {
+      const day = new Date(d.timeMs).toISOString().split('T')[0];
+      if (!dailyFlow[day]) dailyFlow[day] = { deposits: 0, withdrawals: 0, net: 0 };
+      dailyFlow[day].deposits += d.amount;
+      dailyFlow[day].net += d.amount;
+    }
+    for (const w of withdrawals) {
+      const day = new Date(w.timeMs).toISOString().split('T')[0];
+      if (!dailyFlow[day]) dailyFlow[day] = { deposits: 0, withdrawals: 0, net: 0 };
+      dailyFlow[day].withdrawals += w.amount;
+      dailyFlow[day].net -= w.amount;
+    }
+
+    const flowTimeSeries = Object.entries(dailyFlow)
+      .map(([date, data]) => ({ date, ...data }))
+      .sort((a, b) => b.date.localeCompare(a.date));
 
     return new Response(
       JSON.stringify({
         user,
         fromMs: fromMs ? parseInt(fromMs) : null,
         toMs: toMs ? parseInt(toMs) : null,
-        totalDeposits: deposits.reduce((s, d) => s + d.amount, 0),
+        // Core metrics
+        totalDeposits,
+        totalWithdrawals,
+        netDeposits,
         depositCount: deposits.length,
+        withdrawalCount: withdrawals.length,
+        // Bonus: Transfer tracking
+        internalTransferCount: internalTransfers.length,
+        // Bonus: Time series
+        flowTimeSeries,
+        // Detail arrays
         deposits,
+        withdrawals,
+        internalTransfers,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );

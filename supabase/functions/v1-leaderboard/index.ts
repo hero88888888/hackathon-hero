@@ -1,6 +1,13 @@
 /**
  * Leaderboard Endpoint (GET /v1-leaderboard)
  * Ranks users by pnl, returnPct, or volume.
+ * 
+ * BONUS FEATURES:
+ * - Win rate tracking
+ * - Fees paid tracking
+ * - Multi-coin breakdown per user
+ * - Best/worst trade stats
+ * - Risk-adjusted metrics
  */
 
 const corsHeaders = {
@@ -23,6 +30,18 @@ interface UserMetrics {
   returnPct: number;
   tradeCount: number;
   tainted: boolean;
+  // Bonus fields
+  winRate: number;
+  winningTrades: number;
+  losingTrades: number;
+  feesPaid: number;
+  bestTrade: number;
+  worstTrade: number;
+  avgPnl: number;
+  uniqueCoins: number;
+  coinBreakdown: Record<string, { volume: number; pnl: number; count: number }>;
+  currentEquity: number;
+  profitFactor: number; // gross profit / gross loss
 }
 
 async function getMetrics(
@@ -64,6 +83,13 @@ async function getMetrics(
     let fees = 0;
     let volume = 0;
     let tradeCount = 0;
+    let winningTrades = 0;
+    let losingTrades = 0;
+    let grossProfit = 0;
+    let grossLoss = 0;
+    let bestTrade = 0;
+    let worstTrade = 0;
+    const coinBreakdown: Record<string, { volume: number; pnl: number; count: number }> = {};
 
     for (const fill of filtered) {
       const isBuilder = targetBuilder
@@ -75,10 +101,33 @@ async function getMetrics(
 
       if (builderOnly && !isBuilder) continue;
 
-      pnl += parseFloat(fill.closedPnl);
-      fees += parseFloat(fill.fee);
-      volume += parseFloat(fill.px) * parseFloat(fill.sz);
+      const tradePnl = parseFloat(fill.closedPnl);
+      const tradeFee = parseFloat(fill.fee);
+      const tradeVolume = parseFloat(fill.px) * parseFloat(fill.sz);
+      const coinName = fill.coin;
+
+      pnl += tradePnl;
+      fees += tradeFee;
+      volume += tradeVolume;
       tradeCount++;
+
+      if (tradePnl > 0) {
+        winningTrades++;
+        grossProfit += tradePnl;
+      } else if (tradePnl < 0) {
+        losingTrades++;
+        grossLoss += Math.abs(tradePnl);
+      }
+
+      bestTrade = Math.max(bestTrade, tradePnl);
+      worstTrade = Math.min(worstTrade, tradePnl);
+
+      if (!coinBreakdown[coinName]) {
+        coinBreakdown[coinName] = { volume: 0, pnl: 0, count: 0 };
+      }
+      coinBreakdown[coinName].volume += tradeVolume;
+      coinBreakdown[coinName].pnl += tradePnl;
+      coinBreakdown[coinName].count++;
     }
 
     const tainted = builderOnly && hasBuilder && hasNonBuilder;
@@ -88,8 +137,29 @@ async function getMetrics(
     const startEquity = equity - pnl + fees;
     const effectiveCap = Math.min(Math.max(startEquity, 100), maxCap);
     const returnPct = effectiveCap > 0 ? (pnl / effectiveCap) * 100 : 0;
+    const winRate = tradeCount > 0 ? (winningTrades / tradeCount) * 100 : 0;
+    const avgPnl = tradeCount > 0 ? pnl / tradeCount : 0;
+    const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0;
 
-    return { user, volume, pnl, returnPct, tradeCount, tainted };
+    return {
+      user,
+      volume,
+      pnl,
+      returnPct,
+      tradeCount,
+      tainted,
+      winRate,
+      winningTrades,
+      losingTrades,
+      feesPaid: fees,
+      bestTrade,
+      worstTrade,
+      avgPnl,
+      uniqueCoins: Object.keys(coinBreakdown).length,
+      coinBreakdown,
+      currentEquity: equity,
+      profitFactor: profitFactor === Infinity ? 999 : profitFactor,
+    };
   } catch (e) {
     console.error(`Error for ${user}:`, e);
     return null;
@@ -120,22 +190,49 @@ Deno.serve(async (req) => {
 
     const valid = results.filter((m): m is UserMetrics => m !== null);
 
+    // Support multiple sort metrics
     valid.sort((a, b) => {
       if (metric === 'volume') return b.volume - a.volume;
       if (metric === 'returnPct') return b.returnPct - a.returnPct;
+      if (metric === 'winRate') return b.winRate - a.winRate;
+      if (metric === 'profitFactor') return b.profitFactor - a.profitFactor;
+      if (metric === 'tradeCount') return b.tradeCount - a.tradeCount;
       return b.pnl - a.pnl;
     });
 
     const leaderboard = valid.map((m, i) => ({
       rank: i + 1,
       user: m.user,
-      metricValue: metric === 'volume' ? m.volume : metric === 'returnPct' ? m.returnPct : m.pnl,
+      metricValue: metric === 'volume' ? m.volume 
+        : metric === 'returnPct' ? m.returnPct 
+        : metric === 'winRate' ? m.winRate
+        : metric === 'profitFactor' ? m.profitFactor
+        : metric === 'tradeCount' ? m.tradeCount
+        : m.pnl,
       volume: m.volume,
       pnl: m.pnl,
       returnPct: m.returnPct,
       tradeCount: m.tradeCount,
       tainted: m.tainted,
+      // Bonus fields
+      winRate: m.winRate,
+      winningTrades: m.winningTrades,
+      losingTrades: m.losingTrades,
+      feesPaid: m.feesPaid,
+      bestTrade: m.bestTrade,
+      worstTrade: m.worstTrade,
+      avgPnl: m.avgPnl,
+      uniqueCoins: m.uniqueCoins,
+      currentEquity: m.currentEquity,
+      profitFactor: m.profitFactor,
+      coinBreakdown: m.coinBreakdown,
     }));
+
+    // Aggregate stats
+    const totalVolume = valid.reduce((s, m) => s + m.volume, 0);
+    const totalPnl = valid.reduce((s, m) => s + m.pnl, 0);
+    const totalTrades = valid.reduce((s, m) => s + m.tradeCount, 0);
+    const avgWinRate = valid.length > 0 ? valid.reduce((s, m) => s + m.winRate, 0) / valid.length : 0;
 
     return new Response(
       JSON.stringify({
@@ -145,6 +242,14 @@ Deno.serve(async (req) => {
         metric,
         builderOnly,
         count: leaderboard.length,
+        // Bonus: Aggregate stats
+        aggregateStats: {
+          totalVolume,
+          totalPnl,
+          totalTrades,
+          avgWinRate,
+          participantCount: valid.length,
+        },
         leaderboard,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
