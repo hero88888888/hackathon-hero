@@ -231,7 +231,66 @@ docker-compose up -d
 └── docker-compose.yml
 ```
 
-## 🏆 Hackathon Criteria
+### Technical Stack Highlights
+
+**Backend (Supabase Edge Functions):**
+- **Runtime**: Deno for secure, TypeScript-native serverless execution
+- **Data Pipeline**: Parallel API processing with fault-tolerant error handling
+- **Algorithms**: Sequential lifecycle tracking, taint propagation, statistical normalization
+- **Performance**: Sub-second response times for complex multi-asset aggregations
+
+**Frontend (React + TypeScript):**
+- **Type Safety**: Full TypeScript coverage ensuring compile-time error detection
+- **State Management**: TanStack Query for efficient server state synchronization
+- **Real-time Updates**: Live position tracking and cumulative PnL visualization
+- **UI Framework**: shadcn/ui + Tailwind CSS for professional quant-grade interface
+- **Charting**: Recharts for time-series PnL analysis and performance visualization
+
+**Data Processing:**
+- Position lifecycle reconstruction with O(n) time complexity
+- Multi-coin aggregation with parallel processing
+- Risk metric calculation (leverage, liquidation price, margin ratios)
+- Statistical normalization for fair cross-sectional comparison
+
+## 🏆 Quantitative Finance Applications
+
+This project demonstrates production-ready implementations of concepts critical to quantitative finance roles:
+
+### For Risk Management Roles:
+- Real-time leverage monitoring and liquidation price tracking
+- Portfolio-level risk aggregation across multiple instruments
+- Margin utilization analysis for capital efficiency
+- Tail risk analysis through best/worst trade tracking
+
+### For Quantitative Research Roles:
+- Backtesting infrastructure with accurate position reconstruction
+- Win rate and profit factor calculation for strategy evaluation
+- Statistical normalization for fair performance comparison
+- Factor-level attribution (per-coin breakdown)
+
+### For Algorithmic Trading Roles:
+- Order Management System (OMS) style position tracking
+- Sequential state-space modeling for strategy monitoring
+- Multi-venue execution attribution (builder tracking)
+- Transaction cost analysis (fee tracking and aggregation)
+
+### For Portfolio Management Roles:
+- Time-weighted return calculations enabled by deposit tracking
+- Performance attribution across multiple assets
+- Risk-adjusted metrics (profit factor, capped returns)
+- Position flip detection for portfolio rebalancing signals
+
+## 🎓 Academic & Industry Relevance
+
+**Relevant to these quantitative finance concepts:**
+- **Market Microstructure**: Trade direction classification, order flow analysis
+- **Portfolio Theory**: Multi-asset aggregation, correlation analysis preparation
+- **Risk Management**: VaR inputs (leverage, liquidation price), tail risk metrics
+- **Performance Measurement**: Sharpe ratio components, Information ratio inputs
+- **Algorithmic Trading**: State-space models, sequential decision making
+- **Statistical Arbitrage**: Mean-reversion signals (position flips), fair value tracking
+
+## 🏆 Original Hackathon Criteria
 
 | Criterion | Weight | Implementation |
 |-----------|--------|----------------|
